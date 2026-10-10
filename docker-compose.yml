@@ -1,0 +1,157 @@
+# Hệ thống Quản lý Cửa hàng / POS — DTC245200279
+# Chạy:  docker compose up -d --build
+name: pos-dtc245200279
+
+# Cấu hình dùng chung
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  logging: *default-logging
+  restart: unless-stopped
+
+services:
+  # ---------- Sinh chứng chỉ HTTPS tự ký (chạy 1 lần rồi thoát) ----------
+  certgen:
+    image: alpine:3.20
+    command: ["sh", "/generate-cert.sh"]
+    volumes:
+      - ./nginx/generate-cert.sh:/generate-cert.sh:ro
+      - ./nginx/certs:/certs
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    restart: "no"
+
+  # ---------- Nginx reverse proxy (HTTPS + security headers) ----------
+  nginx:
+    <<: *hardening
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    ports:
+      - "80:8080"
+      - "443:8443"
+    volumes:
+      - ./nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/snippets:/etc/nginx/snippets:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    networks: [frontend]
+    depends_on:
+      certgen:
+        condition: service_completed_successfully
+      app:
+        condition: service_healthy
+      phpmyadmin:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/nginx-health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 128M }
+
+  # ---------- Ứng dụng POS (Node.js / Express) ----------
+  app:
+    <<: *hardening
+    build: ./app
+    image: pos-app:1.0
+    user: "1000:1000"
+    init: true
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${MYSQL_DATABASE:?Thiếu MYSQL_DATABASE trong .env}
+      DB_USER: ${APP_DB_USER:?Thiếu APP_DB_USER trong .env}
+      DB_PASSWORD: ${APP_DB_PASSWORD:?Thiếu APP_DB_PASSWORD trong .env}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    networks: [frontend, backend]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+
+  # ---------- MySQL (KHÔNG publish port ra host) ----------
+  mysql:
+    <<: *hardening
+    image: mysql:8.4
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+07:00
+      - --local-infile=0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Thiếu MYSQL_ROOT_PASSWORD trong .env}
+      # root chỉ đăng nhập được từ bên trong container (không đăng nhập root qua mạng)
+      MYSQL_ROOT_HOST: localhost
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      # Dùng tên biến riêng (không phải MYSQL_USER) để user app KHÔNG được cấp ALL PRIVILEGES mặc định;
+      # quyền tối thiểu được cấp trong mysql/init/03-app-user.sh
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    networks: [backend]
+    healthcheck:
+      # Ping qua TCP: lúc khởi tạo MySQL tắt networking nên chỉ "healthy" khi server thật đã sẵn sàng
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1G }
+
+  # ---------- phpMyAdmin (truy cập qua https://localhost/phpmyadmin/) ----------
+  phpmyadmin:
+    <<: *hardening
+    image: phpmyadmin:5.2-apache
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_ABSOLUTE_URI: https://localhost/phpmyadmin/
+      UPLOAD_LIMIT: 2M
+      HIDE_PHP_VERSION: "true"
+    networks: [frontend, backend]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+
+networks:
+  # Mạng phía ngoài: Nginx <-> app / phpMyAdmin
+  frontend:
+    driver: bridge
+  # Mạng nội bộ: chỉ app / phpMyAdmin <-> MySQL, không ra Internet, host không truy cập trực tiếp
+  backend:
+    driver: bridge
+    internal: true
+
+volumes:
+  mysql_data:

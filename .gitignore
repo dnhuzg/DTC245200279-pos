@@ -1,0 +1,20 @@
+# Bí mật & chứng chỉ — KHÔNG commit
+.env
+nginx/certs/*
+!nginx/certs/.gitkeep
+
+# Tài liệu đề bài / mẫu báo cáo của trường — không đưa lên repo
+de-tai.md
+mau-bao-cao.docx
+*.docx
+~$*
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

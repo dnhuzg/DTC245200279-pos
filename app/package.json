@@ -1,0 +1,17 @@
+{
+  "name": "pos-app",
+  "version": "1.0.0",
+  "description": "Hệ thống Quản lý Cửa hàng / POS - DTC245200279",
+  "main": "src/server.js",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "mysql2": "^3.14.0"
+  }
+}
