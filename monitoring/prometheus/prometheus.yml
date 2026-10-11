@@ -1,0 +1,41 @@
+# Prometheus — thu thập metrics từ các thành phần của hệ thống POS
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    project: pos-dtc245200279
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+scrape_configs:
+  # Chính Prometheus (chạy dưới đường dẫn /prometheus)
+  - job_name: prometheus
+    metrics_path: /prometheus/metrics
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Ứng dụng POS (prom-client): request, độ trễ, hóa đơn, doanh thu, tồn kho thấp
+  - job_name: pos-app
+    static_configs:
+      - targets: ["app:3000"]
+
+  # Web server Nginx qua nginx-prometheus-exporter (đọc stub_status)
+  - job_name: nginx
+    static_configs:
+      - targets: ["nginx-exporter:9113"]
+
+  # Database MySQL qua mysqld-exporter
+  - job_name: mysql
+    static_configs:
+      - targets: ["mysqld-exporter:9104"]
+
+  # Tài nguyên từng container (CPU, RAM, network) qua cAdvisor
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      # Chỉ giữ metrics của container thuộc project này để giảm dữ liệu
+      - source_labels: [container_label_com_docker_compose_project]
+        regex: pos-dtc245200279|
+        action: keep

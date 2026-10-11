@@ -16,13 +16,18 @@ x-hardening: &hardening
   restart: unless-stopped
 
 services:
-  # ---------- Sinh chứng chỉ HTTPS tự ký (chạy 1 lần rồi thoát) ----------
+  # ---------- Sinh chứng chỉ HTTPS tự ký + basic auth Prometheus (chạy rồi thoát) ----------
   certgen:
     image: alpine:3.20
-    command: ["sh", "/generate-cert.sh"]
+    command: ["sh", "-c", "sh /generate-cert.sh && sh /generate-htpasswd.sh"]
+    environment:
+      PROMETHEUS_USER: ${PROMETHEUS_USER:?Thiếu PROMETHEUS_USER trong .env}
+      PROMETHEUS_PASSWORD: ${PROMETHEUS_PASSWORD:?Thiếu PROMETHEUS_PASSWORD trong .env}
     volumes:
       - ./nginx/generate-cert.sh:/generate-cert.sh:ro
+      - ./nginx/generate-htpasswd.sh:/generate-htpasswd.sh:ro
       - ./nginx/certs:/certs
+      - ./nginx/auth:/auth
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -39,17 +44,22 @@ services:
       - ./nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./nginx/snippets:/etc/nginx/snippets:ro
       - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/auth:/etc/nginx/auth:ro
     read_only: true
     tmpfs:
       - /tmp
     cap_drop: [ALL]
-    networks: [frontend]
+    networks: [frontend, monitoring]
     depends_on:
       certgen:
         condition: service_completed_successfully
       app:
         condition: service_healthy
       phpmyadmin:
+        condition: service_started
+      grafana:
+        condition: service_started
+      prometheus:
         condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/nginx-health"]
@@ -78,7 +88,7 @@ services:
     tmpfs:
       - /tmp
     cap_drop: [ALL]
-    networks: [frontend, backend]
+    networks: [frontend, backend, monitoring]
     depends_on:
       mysql:
         condition: service_healthy
@@ -110,6 +120,9 @@ services:
       # quyền tối thiểu được cấp trong mysql/init/03-app-user.sh
       APP_DB_USER: ${APP_DB_USER}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      # User chỉ đọc trạng thái cho mysqld-exporter (mysql/init/04-exporter-user.sh)
+      MYSQL_EXPORTER_USER: ${MYSQL_EXPORTER_USER:?Thiếu MYSQL_EXPORTER_USER trong .env}
+      MYSQL_EXPORTER_PASSWORD: ${MYSQL_EXPORTER_PASSWORD:?Thiếu MYSQL_EXPORTER_PASSWORD trong .env}
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
     volumes:
       - mysql_data:/var/lib/mysql
@@ -144,14 +157,157 @@ services:
       resources:
         limits: { cpus: "0.50", memory: 256M }
 
+  # ================= GIÁM SÁT: Prometheus + Grafana + exporters =================
+
+  # ---------- Prometheus (https://localhost/prometheus/, có basic auth) ----------
+  prometheus:
+    <<: *hardening
+    image: prom/prometheus:v3.4.0
+    user: "65534:65534"   # nobody
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.external-url=https://localhost/prometheus/
+      - --web.route-prefix=/prometheus
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus_data:/prometheus
+    read_only: true
+    cap_drop: [ALL]
+    networks: [monitoring]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/prometheus/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 512M }
+
+  # ---------- Grafana (https://localhost/grafana/) ----------
+  grafana:
+    <<: *hardening
+    image: grafana/grafana:11.6.0
+    user: "472:0"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?Thiếu GRAFANA_ADMIN_USER trong .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Thiếu GRAFANA_ADMIN_PASSWORD trong .env}
+      GF_SERVER_ROOT_URL: https://localhost/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      # Mạng monitoring không ra Internet -> tắt tự cài plugin / tải khóa ký plugin
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/pos-overview.json
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    networks: [monitoring]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/grafana/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+
+  # ---------- cAdvisor: metrics CPU/RAM/network của từng container ----------
+  # Ngoại lệ hardening: cần privileged + mount /sys, /var/lib/docker (chỉ đọc) để đọc cgroup của Docker.
+  # Không publish port, chỉ nằm trong mạng monitoring nội bộ.
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.53.0
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service,com.docker.compose.project
+      - --disable_metrics=percpu,sched,tcp,udp,disk,diskIO,hugetlb,referenced_memory,cpu_topology,resctrl,process,advtcp
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks: [monitoring]
+    logging: *default-logging
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M }
+
+  # ---------- nginx-exporter: đọc stub_status (cổng nội bộ 8081) của Nginx ----------
+  nginx-exporter:
+    <<: *hardening
+    image: nginx/nginx-prometheus-exporter:1.4.2
+    user: "65534:65534"
+    command:
+      - --nginx.scrape-uri=http://nginx:8081/stub_status
+    read_only: true
+    cap_drop: [ALL]
+    networks: [monitoring]
+    depends_on:
+      - nginx
+    deploy:
+      resources:
+        limits: { cpus: "0.20", memory: 64M }
+
+  # ---------- mysqld-exporter: metrics MySQL bằng user chỉ đọc trạng thái ----------
+  mysqld-exporter:
+    <<: *hardening
+    image: prom/mysqld-exporter:v0.17.2
+    user: "65534:65534"
+    command:
+      - --mysqld.address=mysql:3306
+      - --mysqld.username=${MYSQL_EXPORTER_USER}
+    environment:
+      MYSQLD_EXPORTER_PASSWORD: ${MYSQL_EXPORTER_PASSWORD}
+    read_only: true
+    cap_drop: [ALL]
+    # Nằm ở cả backend (để tới MySQL) và monitoring (để Prometheus scrape)
+    networks: [backend, monitoring]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "0.20", memory: 64M }
+
 networks:
   # Mạng phía ngoài: Nginx <-> app / phpMyAdmin
   frontend:
     driver: bridge
-  # Mạng nội bộ: chỉ app / phpMyAdmin <-> MySQL, không ra Internet, host không truy cập trực tiếp
+  # Mạng nội bộ: chỉ app / phpMyAdmin / mysqld-exporter <-> MySQL, không ra Internet
   backend:
+    driver: bridge
+    internal: true
+  # Mạng giám sát nội bộ: Prometheus, Grafana, exporters; không ra Internet, không publish port
+  monitoring:
     driver: bridge
     internal: true
 
 volumes:
   mysql_data:
+  prometheus_data:
+  grafana_data:

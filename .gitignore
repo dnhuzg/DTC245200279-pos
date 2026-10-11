@@ -2,6 +2,8 @@
 .env
 nginx/certs/*
 !nginx/certs/.gitkeep
+nginx/auth/*
+!nginx/auth/.gitkeep
 
 # Tài liệu đề bài / mẫu báo cáo của trường — không đưa lên repo
 de-tai.md

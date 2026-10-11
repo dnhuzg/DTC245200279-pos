@@ -1,0 +1,51 @@
+# Cảnh báo cơ bản — xem tại https://localhost/prometheus/alerts
+groups:
+  - name: pos-system
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target {{ $labels.job }} ({{ $labels.instance }}) không phản hồi"
+
+      - alert: MySQLDown
+        expr: mysql_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "mysqld-exporter không kết nối được MySQL"
+
+      - alert: NginxDown
+        expr: nginx_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "nginx-exporter không đọc được stub_status của Nginx"
+
+      - alert: HighErrorRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tỷ lệ lỗi 5xx của app vượt 5%"
+
+      - alert: LowStockProducts
+        expr: pos_products{state="low"} > 0
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "Có {{ $value }} sản phẩm tồn kho thấp cần nhập thêm"
+
+      - alert: ContainerHighMemory
+        expr: container_memory_working_set_bytes{container_label_com_docker_compose_service!=""} / (container_spec_memory_limit_bytes{container_label_com_docker_compose_service!=""} > 0) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.container_label_com_docker_compose_service }} dùng > 90% RAM giới hạn"

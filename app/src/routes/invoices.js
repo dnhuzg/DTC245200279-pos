@@ -2,6 +2,7 @@ const express = require('express');
 const { pool, withTransaction } = require('../db');
 const { HttpError, toInt, toText } = require('../errors');
 const log = require('../logger');
+const { invoicesCreated, revenue, stockErrors } = require('../metrics');
 
 const router = express.Router();
 
@@ -70,7 +71,10 @@ router.post('/', async (req, res) => {
       .map((id) => ({ p: byId.get(id), qty: wanted.get(id) }))
       .filter(({ p, qty }) => p.stock < qty)
       .map(({ p, qty }) => ({ product_id: p.id, name: p.name, requested: qty, available: p.stock }));
-    if (shortages.length) throw new HttpError(409, 'Không đủ tồn kho', shortages);
+    if (shortages.length) {
+      stockErrors.inc();
+      throw new HttpError(409, 'Không đủ tồn kho', shortages);
+    }
 
     const lines = ids.map((id) => {
       const p = byId.get(id);
@@ -101,6 +105,8 @@ router.post('/', async (req, res) => {
     return { invoice: await findInvoice(invoiceId, conn), lowStock: low };
   });
 
+  invoicesCreated.inc();
+  revenue.inc(invoice.total);
   log.info('invoice_created', { invoice_id: invoice.id, code: invoice.code, total: invoice.total, lines: invoice.items.length });
   for (const p of lowStock) {
     log.warn('low_stock', { product_id: p.product_id, sku: p.sku, stock: p.stock, min_stock: p.min_stock });

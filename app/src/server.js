@@ -3,6 +3,7 @@ const express = require('express');
 const { pool } = require('./db');
 const { HttpError } = require('./errors');
 const log = require('./logger');
+const { httpMetrics, captureBase, metricsHandler } = require('./metrics');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -11,11 +12,11 @@ app.disable('x-powered-by');
 // Chạy sau Nginx: tin header X-Forwarded-* từ đúng 1 proxy
 app.set('trust proxy', 1);
 
-// Log mỗi request dạng JSON (bỏ qua healthcheck cho đỡ nhiễu)
+// Log mỗi request dạng JSON (bỏ qua healthcheck/metrics cho đỡ nhiễu)
 app.use((req, res, next) => {
   const start = process.hrtime.bigint();
   res.on('finish', () => {
-    if (req.path === '/healthz') return;
+    if (req.path === '/healthz' || req.path === '/metrics') return;
     const fields = {
       method: req.method,
       path: req.originalUrl.split('?')[0],
@@ -30,7 +31,11 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use(httpMetrics);
 app.use(express.json({ limit: '100kb' }));
+
+// Prometheus scrape trực tiếp qua mạng monitoring; Nginx chặn đường dẫn này từ bên ngoài
+app.get('/metrics', metricsHandler);
 
 app.get('/healthz', async (_req, res) => {
   try {
@@ -57,8 +62,8 @@ app.get('/api/stats', async (_req, res) => {
   });
 });
 
-app.use('/api/products', require('./routes/products'));
-app.use('/api/invoices', require('./routes/invoices'));
+app.use('/api/products', captureBase, require('./routes/products'));
+app.use('/api/invoices', captureBase, require('./routes/invoices'));
 
 app.use('/api', (_req, _res) => {
   throw new HttpError(404, 'API không tồn tại');

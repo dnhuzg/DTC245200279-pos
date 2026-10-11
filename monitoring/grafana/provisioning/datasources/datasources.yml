@@ -1,0 +1,13 @@
+# Grafana tự tạo datasource khi khởi động (không cần cấu hình tay trên giao diện)
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090/prometheus
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s

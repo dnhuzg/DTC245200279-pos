@@ -1,0 +1,11 @@
+# Grafana tự nạp các dashboard JSON trong thư mục /etc/grafana/dashboards
+apiVersion: 1
+
+providers:
+  - name: pos-dashboards
+    folder: POS
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards
