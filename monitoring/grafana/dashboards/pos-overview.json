@@ -70,11 +70,11 @@
               },
               {
                 "color": "orange",
-                "value": 3
+                "value": 6
               },
               {
                 "color": "green",
-                "value": 5
+                "value": 8
               }
             ]
           },
@@ -84,7 +84,7 @@
         },
         "overrides": []
       },
-      "description": "Số target Prometheus scrape thành công (tổng 5: prometheus, app, nginx, mysql, cadvisor)"
+      "description": "Số target Prometheus scrape thành công (tổng 8: prometheus, app, nginx, mysql, cadvisor, loki, promtail, alertmanager)"
     },
     {
       "id": 2,

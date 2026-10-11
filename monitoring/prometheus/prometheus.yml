@@ -8,6 +8,13 @@ global:
 rule_files:
   - /etc/prometheus/alert-rules.yml
 
+# Gửi alert sang Alertmanager (Alertmanager chạy dưới đường dẫn /alertmanager)
+alerting:
+  alertmanagers:
+    - path_prefix: /alertmanager
+      static_configs:
+        - targets: ["alertmanager:9093"]
+
 scrape_configs:
   # Chính Prometheus (chạy dưới đường dẫn /prometheus)
   - job_name: prometheus
@@ -29,6 +36,20 @@ scrape_configs:
   - job_name: mysql
     static_configs:
       - targets: ["mysqld-exporter:9104"]
+
+  # Hệ thống log & cảnh báo (giám sát chính các công cụ giám sát)
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+
+  - job_name: promtail
+    static_configs:
+      - targets: ["promtail:9080"]
+
+  - job_name: alertmanager
+    metrics_path: /alertmanager/metrics
+    static_configs:
+      - targets: ["alertmanager:9093"]
 
   # Tài nguyên từng container (CPU, RAM, network) qua cAdvisor
   - job_name: cadvisor

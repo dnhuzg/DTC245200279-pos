@@ -1,0 +1,18 @@
+{{/* Nội dung tin nhắn Telegram (parse_mode HTML) */}}
+{{ define "telegram.pos" -}}
+{{ if eq .Status "firing" }}🚨 <b>CẢNH BÁO: {{ .CommonLabels.alertname }}</b>{{ else }}✅ <b>ĐÃ HẾT: {{ .CommonLabels.alertname }}</b>{{ end }}
+Hệ thống POS — DTC245200279
+{{ range .Alerts }}
+━━━━━━━━━━━━
+<b>Mức độ:</b> {{ .Labels.severity | toUpper }}{{ if .Labels.category }} ({{ .Labels.category }}){{ end }}
+<b>Nội dung:</b> {{ .Annotations.summary | html }}
+{{- if .Annotations.description }}
+<b>Chi tiết:</b> {{ .Annotations.description | html }}{{ end }}
+{{- if .Labels.remote_addr }}
+<b>IP nguồn:</b> <code>{{ .Labels.remote_addr }}</code>{{ end }}
+<b>Bắt đầu:</b> {{ .StartsAt.Local.Format "15:04:05 02/01/2006" }}
+{{- if eq .Status "resolved" }}
+<b>Kết thúc:</b> {{ .EndsAt.Local.Format "15:04:05 02/01/2006" }}{{ end }}
+{{ end }}
+🔎 Truy vết log: https://localhost/grafana/d/pos-security
+{{- end }}

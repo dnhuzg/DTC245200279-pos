@@ -294,6 +294,83 @@ services:
       resources:
         limits: { cpus: "0.20", memory: 64M }
 
+  # ================= LOG TẬP TRUNG & CẢNH BÁO: Loki + Promtail + Alertmanager =================
+
+  # ---------- Loki: lưu trữ log tập trung + ruler chạy luật cảnh báo bảo mật (LogQL) ----------
+  loki:
+    <<: *hardening
+    image: grafana/loki:3.5.0
+    user: "10001:10001"
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - ./monitoring/loki/rules:/etc/loki/rules/fake:ro
+      - loki_data:/loki
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    networks: [monitoring]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3100/ready | grep -q ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 512M }
+
+  # ---------- Promtail: thu log mọi container của project và đẩy về Loki ----------
+  # Cần đọc Docker socket (chỉ đọc) để tự phát hiện container và đọc log stdout/stderr.
+  promtail:
+    <<: *hardening
+    image: grafana/promtail:3.5.0
+    user: "0:0"   # cần quyền đọc /var/run/docker.sock
+    command: ["-config.file=/etc/promtail/promtail-config.yml"]
+    volumes:
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail_data:/var/lib/promtail
+    read_only: true
+    cap_drop: [ALL]
+    networks: [monitoring]
+    depends_on:
+      loki:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "0.30", memory: 128M }
+
+  # ---------- Alertmanager: nhận alert (Prometheus + Loki), gửi Telegram ----------
+  alertmanager:
+    <<: *hardening
+    image: prom/alertmanager:v0.28.1
+    user: "65534:65534"
+    entrypoint: ["/bin/sh", "/etc/alertmanager/entrypoint.sh"]
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./monitoring/alertmanager/entrypoint.sh:/etc/alertmanager/entrypoint.sh:ro
+      - ./monitoring/alertmanager/templates:/etc/alertmanager/templates:ro
+      - alertmanager_data:/alertmanager
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    # monitoring (nhận alert từ Prometheus/Loki) + egress (ra Internet CHỈ để gửi Telegram)
+    networks: [monitoring, egress]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9093/alertmanager/-/healthy >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits: { cpus: "0.20", memory: 128M }
+
 networks:
   # Mạng phía ngoài: Nginx <-> app / phpMyAdmin
   frontend:
@@ -306,8 +383,14 @@ networks:
   monitoring:
     driver: bridge
     internal: true
+  # Mạng CHỈ để Alertmanager ra Internet gửi cảnh báo Telegram (duy nhất service có egress)
+  egress:
+    driver: bridge
 
 volumes:
   mysql_data:
   prometheus_data:
   grafana_data:
+  loki_data:
+  promtail_data:
+  alertmanager_data:

@@ -1,0 +1,43 @@
+# Promtail — thu log stdout/stderr của MỌI container trong project và đẩy về Loki
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /var/lib/promtail/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    # Tự phát hiện container qua Docker API (chỉ lấy container của project này)
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["com.docker.compose.project=pos-dtc245200279"]
+    relabel_configs:
+      # Nhãn "service" = tên service trong docker-compose (app, nginx, mysql, ...)
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: container
+      # stdout / stderr (Nginx: access log -> stdout, error log -> stderr)
+      - source_labels: [__meta_docker_container_log_stream]
+        target_label: stream
+      - target_label: project
+        replacement: pos-dtc245200279
+    pipeline_stages:
+      # Log của app là JSON: tách "level" thành nhãn để lọc nhanh (info / warn / error)
+      - match:
+          selector: '{service="app"}'
+          stages:
+            - json:
+                expressions:
+                  level: level
+            - labels:
+                level:

@@ -1,0 +1,38 @@
+# Alertmanager — nhận alert từ Prometheus (metrics) và Loki ruler (log), gom nhóm rồi gửi Telegram.
+# File này là MẪU: entrypoint.sh thay __TELEGRAM_*__ bằng giá trị trong .env lúc khởi động
+# (token không nằm trong repo). Nếu .env không có Telegram -> chỉ xem alert trên giao diện.
+global:
+  resolve_timeout: 5m
+
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+route:
+  receiver: __DEFAULT_RECEIVER__
+  group_by: [alertname, remote_addr]
+  group_wait: 10s          # chờ 10s gom các alert cùng nhóm rồi gửi 1 tin
+  group_interval: 1m
+  repeat_interval: 1h      # alert vẫn còn -> nhắc lại sau 1 giờ
+  routes:
+    # Cảnh báo nghiệp vụ (tồn kho thấp) ít khẩn cấp -> chỉ nhắc lại mỗi 12 giờ
+    - matchers: ['severity="info"']
+      receiver: __DEFAULT_RECEIVER__
+      repeat_interval: 12h
+
+# Đang có sự cố bảo mật critical từ 1 IP thì không gửi thêm cảnh báo "high" của cùng IP đó (giảm spam)
+inhibit_rules:
+  - source_matchers: ['severity="critical"', 'category="security"']
+    target_matchers: ['severity="high"', 'category="security"']
+    equal: [remote_addr]
+
+receivers:
+  - name: web-only
+  # BEGIN-TELEGRAM
+  - name: telegram
+    telegram_configs:
+      - bot_token: "__TELEGRAM_BOT_TOKEN__"
+        chat_id: __TELEGRAM_CHAT_ID__
+        parse_mode: HTML
+        send_resolved: true
+        message: '{{ template "telegram.pos" . }}'
+  # END-TELEGRAM

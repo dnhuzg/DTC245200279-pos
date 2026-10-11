@@ -1,0 +1,76 @@
+# Luật cảnh báo AN TOÀN THÔNG TIN viết bằng LogQL, Loki ruler đánh giá mỗi 15 giây
+# trên access log JSON của Nginx. Khi vượt ngưỡng -> gửi alert sang Alertmanager -> Telegram.
+groups:
+  - name: security
+    rules:
+      # 1. Dò mật khẩu (brute-force) vào trang có basic auth (/prometheus/, /alertmanager/)
+      - alert: BruteForceLogin
+        expr: |
+          sum by (remote_addr) (
+            count_over_time({service="nginx", stream="stdout"} | json | status="401" [1m])
+          ) > 10
+        for: 0m
+        labels:
+          severity: critical
+          category: security
+        annotations:
+          summary: "Nghi brute-force: IP {{ $labels.remote_addr }} đăng nhập sai {{ $value }} lần/phút"
+          description: "Nhiều phản hồi 401 từ cùng một IP. Truy vết: {service=\"nginx\"} | json | status=\"401\" | remote_addr=\"{{ $labels.remote_addr }}\""
+
+      # 2. Dò quét lỗ hổng: truy cập hàng loạt đường dẫn nhạy cảm (.env, .git, wp-admin, phpinfo, backup...)
+      - alert: SensitivePathScan
+        expr: |
+          sum by (remote_addr) (
+            count_over_time({service="nginx", stream="stdout"} | json
+              | request_uri =~ `(?i).*(\.env|\.git|wp-admin|wp-login|phpinfo|\.sql|\.bak|backup|/admin|/config|server-status|\.htaccess).*` [2m])
+          ) > 5
+        for: 0m
+        labels:
+          severity: high
+          category: security
+        annotations:
+          summary: "Dò quét lỗ hổng: IP {{ $labels.remote_addr }} truy cập {{ $value }} đường dẫn nhạy cảm"
+          description: "Có dấu hiệu dùng công cụ quét (scanner) tìm file cấu hình / mã nguồn bị lộ."
+
+      # 3. Thử tấn công SQL Injection qua tham số URL
+      - alert: SQLInjectionAttempt
+        expr: |
+          sum by (remote_addr) (
+            count_over_time({service="nginx", stream="stdout"} | json
+              | request_uri =~ `(?i).*(union(%20|\+)+(all(%20|\+)+)?select|%27(%20|\+)*or|or(%20|\+)+1(%20|\+)*%3d(%20|\+)*1|sleep\(|benchmark\(|information_schema|--(%20|\+|$)).*` [2m])
+          ) > 0
+        for: 0m
+        labels:
+          severity: critical
+          category: security
+        annotations:
+          summary: "Phát hiện thử SQL Injection từ IP {{ $labels.remote_addr }} ({{ $value }} request)"
+          description: "Tham số URL chứa mẫu SQL Injection (UNION SELECT, ' OR 1=1, SLEEP()...)."
+
+      # 4. Gửi request dồn dập (flood / DoS cơ bản) bị Nginx rate limit chặn (429)
+      - alert: RequestFlood
+        expr: |
+          sum by (remote_addr) (
+            count_over_time({service="nginx", stream="stdout"} | json | status="429" [1m])
+          ) > 20
+        for: 0m
+        labels:
+          severity: high
+          category: security
+        annotations:
+          summary: "Request dồn dập: IP {{ $labels.remote_addr }} bị rate limit chặn {{ $value }} lần/phút"
+          description: "Nginx trả 429 Too Many Requests — có thể là tấn công từ chối dịch vụ (DoS) hoặc bot."
+
+  - name: application
+    rules:
+      # 5. Ứng dụng phát sinh lỗi 5xx / lỗi không xử lý được
+      - alert: AppErrorLogs
+        expr: |
+          sum(count_over_time({service="app", level="error"} [5m])) > 5
+        for: 1m
+        labels:
+          severity: warning
+          category: application
+        annotations:
+          summary: "Ứng dụng ghi {{ $value }} log lỗi trong 5 phút"
+          description: "Kiểm tra: {service=\"app\", level=\"error\"}"

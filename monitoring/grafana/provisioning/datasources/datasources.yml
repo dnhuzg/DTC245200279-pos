@@ -11,3 +11,26 @@ datasources:
     editable: false
     jsonData:
       timeInterval: 15s
+      manageAlerts: true
+
+  # Log tập trung (Promtail -> Loki), truy vấn bằng LogQL
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+      manageAlerts: true
+
+  # Xem các alert đang bật (từ Prometheus và Loki ruler) ngay trong Grafana
+  - name: Alertmanager
+    uid: alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093/alertmanager
+    editable: false
+    jsonData:
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false

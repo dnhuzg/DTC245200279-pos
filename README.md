@@ -50,7 +50,12 @@ Prometheus thu thập metrics mỗi 15 giây từ 5 nguồn: chính nó, app (`a
 | `cadvisor` | ghcr.io/google/cadvisor:v0.53.0 | monitoring | — |
 | `nginx-exporter` | nginx/nginx-prometheus-exporter:1.4.2 | monitoring | — |
 | `mysqld-exporter` | prom/mysqld-exporter:v0.17.2 | backend, monitoring | — |
+| `loki` | grafana/loki:3.5.0 | monitoring | — |
+| `promtail` | grafana/promtail:3.5.0 | monitoring | — |
+| `alertmanager` | prom/alertmanager:v0.28.1 | monitoring, egress | — |
 | `certgen` | alpine:3.20 (sinh chứng chỉ + basic auth rồi thoát) | — | — |
+
+**Luồng log & cảnh báo:** Promtail đọc log stdout của mọi container (qua Docker API) → đẩy về **Loki**. **Loki ruler** chạy các luật cảnh báo an toàn thông tin bằng LogQL trên access log của Nginx. Khi phát hiện tấn công → gửi alert sang **Alertmanager** → gửi tin nhắn **Telegram**. Grafana đọc Loki để truy vết log bằng LogQL.
 
 ## Cấu trúc thư mục
 
@@ -67,13 +72,23 @@ Prometheus thu thập metrics mỗi 15 giây từ 5 nguồn: chính nó, app (`a
 │   ├── 02-seed.sql           # dữ liệu mẫu
 │   ├── 03-app-user.sh        # tạo user app với quyền tối thiểu
 │   └── 04-exporter-user.sh   # user chỉ đọc trạng thái cho mysqld-exporter
+├── scripts/
+│   └── attack-simulation.sh  # giả lập tấn công để demo cảnh báo + truy vết log
 ├── monitoring/
 │   ├── prometheus/
 │   │   ├── prometheus.yml    # danh sách target scrape
-│   │   └── alert-rules.yml   # luật cảnh báo
-│   └── grafana/
-│       ├── provisioning/     # tự tạo datasource + nạp dashboard
-│       └── dashboards/pos-overview.json
+│   │   └── alert-rules.yml   # luật cảnh báo (metrics)
+│   ├── grafana/
+│   │   ├── provisioning/     # tự tạo datasource + nạp dashboard
+│   │   └── dashboards/       # pos-overview.json, pos-security.json
+│   ├── loki/
+│   │   ├── loki-config.yml
+│   │   └── rules/security-rules.yml   # luật cảnh báo ATTT (LogQL)
+│   ├── promtail/promtail-config.yml
+│   └── alertmanager/
+│       ├── alertmanager.yml  # mẫu cấu hình (điền token lúc chạy)
+│       ├── entrypoint.sh
+│       └── templates/telegram.tmpl
 └── nginx/
     ├── conf.d/default.conf   # reverse proxy + HTTPS + stub_status
     ├── snippets/security-headers.conf
@@ -122,8 +137,9 @@ docker compose down -v              # dừng và XÓA dữ liệu MySQL (lần s
 |---|---|
 | Website POS | https://localhost |
 | phpMyAdmin | https://localhost/phpmyadmin/ |
-| Grafana (dashboard “POS - Tổng quan hệ thống”) | https://localhost/grafana/ |
+| Grafana (dashboard “POS - Tổng quan hệ thống” và “POS - An ninh & Log”) | https://localhost/grafana/ |
 | Prometheus (targets, alerts, truy vấn PromQL) | https://localhost/prometheus/ |
+| Alertmanager (các cảnh báo đang bật) | https://localhost/alertmanager/ |
 | API kiểm tra sức khỏe | https://localhost/healthz |
 
 ## Tài khoản demo
@@ -190,6 +206,57 @@ Metrics riêng của app (`app/src/metrics.js`):
 
 Luật cảnh báo trong `monitoring/prometheus/alert-rules.yml` (xem tại *Prometheus → Alerts*): `TargetDown`, `MySQLDown`, `NginxDown`, `HighErrorRate`, `LowStockProducts`, `ContainerHighMemory`.
 
+## Log tập trung (Loki + Promtail) và LogQL
+
+Promtail tự phát hiện mọi container của project qua Docker API và đẩy log stdout/stderr về Loki, gắn nhãn `service` (app, nginx, mysql…), `stream` và `level`. Access log của Nginx ở **định dạng JSON** nên lọc được theo IP, đường dẫn, mã trạng thái. Truy vấn trong Grafana → *Explore* → datasource **Loki**.
+
+Một số câu **LogQL** mẫu:
+
+```logql
+# 1) Toàn bộ log của ứng dụng POS, lọc theo mức độ
+{service="app"} | json | level="error"
+
+# 2) Request qua Nginx theo mã trạng thái (phát hiện 4xx/5xx bất thường)
+sum by (status) (count_over_time({service="nginx"} | json [1m]))
+
+# 3) Tất cả sự kiện bảo mật (đăng nhập sai, dò quét, bị chặn) kèm IP nguồn
+{service="nginx"} | json | status=~"401|403|404|429"
+
+# 4) Xác định IP tấn công: đếm số lần đăng nhập sai (401) trong 5 phút
+sum by (remote_addr) (count_over_time({service="nginx"} | json | status="401" [5m]))
+
+# 5) Các request thử SQL Injection
+{service="nginx"} | json | request_uri =~ "(?i).*(union.*select|or.*1=1|sleep\\(|--).*"
+```
+
+## Kịch bản sự cố an toàn thông tin (demo)
+
+Script `scripts/attack-simulation.sh` tái hiện 4 kiểu tấn công vào hệ thống để minh họa chuỗi **TẤN CÔNG → HỆ THỐNG CẢNH BÁO (Telegram) → TRUY VẾT BẰNG LOG (LogQL)**:
+
+```bash
+bash scripts/attack-simulation.sh
+```
+
+| # | Tấn công giả lập | Dấu hiệu | Luật cảnh báo (Loki ruler) |
+|---|---|---|---|
+| 1 | Brute-force mật khẩu trang quản trị | Nhiều `401` từ 1 IP | `BruteForceLogin` |
+| 2 | Dò quét file nhạy cảm (`.env`, `.git`, `wp-admin`…) | Nhiều `404` vào path nhạy cảm | `SensitivePathScan` |
+| 3 | SQL Injection qua tham số URL | `request_uri` chứa mẫu SQLi | `SQLInjectionAttempt` |
+| 4 | Flood request (DoS cơ bản) | Nhiều `429` (bị rate limit) | `RequestFlood` |
+
+Sau khi chạy, trong ~15–30 giây: cảnh báo chuyển **FIRING** tại Alertmanager và **gửi tin nhắn Telegram**; mở dashboard **POS - An ninh & Log** để truy vết IP tấn công, các đường dẫn đã thử và mã phản hồi. Lưu ý: ứng dụng dùng **truy vấn tham số hóa** nên các request SQL Injection trả `200` nhưng **không khai thác được dữ liệu** (kết quả rỗng) — log vẫn ghi lại đầy đủ để điều tra.
+
+### Bật cảnh báo Telegram (tùy chọn)
+
+Thêm vào `.env` (nếu bỏ trống, hệ thống vẫn chạy, chỉ xem alert trên giao diện Alertmanager):
+
+```
+TELEGRAM_BOT_TOKEN=<token từ @BotFather>
+TELEGRAM_CHAT_ID=<chat id của bạn>
+```
+
+Tạo bot bằng **@BotFather** (`/newbot`), bấm **Start** với bot vừa tạo, rồi lấy `chat_id` tại `https://api.telegram.org/bot<token>/getUpdates`. Chỉ container `alertmanager` được nối mạng `egress` để ra Internet gửi cảnh báo; các dịch vụ còn lại vẫn cô lập.
+
 Một số truy vấn PromQL thử trong Prometheus:
 
 ```promql
@@ -208,7 +275,8 @@ sum by (container_label_com_docker_compose_service) (container_memory_working_se
 | Không publish port nội bộ | Chỉ Nginx publish 80/443. MySQL, Prometheus, Grafana, exporters, stub_status (8081) **không publish port** |
 | Mật khẩu mạnh qua `.env` | Không hard-code mật khẩu; `.env` nằm trong `.gitignore`; compose báo lỗi nếu thiếu biến |
 | Quyền DB tối thiểu | User app chỉ có `SELECT, INSERT, UPDATE, DELETE` trên `pos_db`; user exporter chỉ `PROCESS, REPLICATION CLIENT` + đọc `performance_schema`, tối đa 3 kết nối; root chỉ đăng nhập từ `localhost` trong container; tắt `local-infile` |
-| Giám sát có xác thực | Grafana bắt đăng nhập (tắt anonymous, tắt đăng ký, cookie secure); Prometheus UI bảo vệ bằng basic auth; `/metrics` của app bị Nginx chặn từ ngoài (trả 404) |
+| Giám sát có xác thực | Grafana bắt đăng nhập (tắt anonymous, tắt đăng ký, cookie secure); Prometheus & Alertmanager UI bảo vệ bằng basic auth; `/metrics` của app bị Nginx chặn từ ngoài (trả 404) |
+| Cô lập egress | Chỉ `alertmanager` được ra Internet (mạng `egress`) để gửi Telegram; toàn bộ dịch vụ khác nằm trong mạng `internal`, không ra ngoài. Token Telegram chỉ nằm trong `/tmp` của container, không ghi vào repo |
 | Giảm đặc quyền container | `no-new-privileges` cho mọi service; `cap_drop: ALL` và `read_only` filesystem cho app, nginx, prometheus, grafana, exporters. Ngoại lệ: cAdvisor cần `privileged` + mount chỉ đọc `/sys`, `/var/lib/docker` để đọc cgroup |
 | Nginx | HTTPS (TLS 1.2/1.3), chuyển hướng HTTP→HTTPS, ẩn version (`server_tokens off`), rate limit API, chặn file ẩn (`.env`, `.git`) |
 | Security headers | `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy` |
